@@ -1,59 +1,35 @@
-import random
-import cv2
-import os
-import time
-import gc
-from firebase.db_operations import get_random_image_from_location
-from .inference import run_detection  # This should accept a NumPy image, not a file path
+from fastapi import FastAPI, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
+from app.simulation import start_simulation, stop_simulation, simulation_state
 
-def save_results(image, detections, location_id):
-    """Draw detections and save image to disk."""
-    for detection in detections:
-        x1, y1, x2, y2 = map(int, detection['bbox'])
-        cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        label = f"{detection['class']} {detection['confidence']:.2f}"
-        cv2.putText(image, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+app = FastAPI()
 
-    # Optionally add location info
-    cv2.putText(image, f"Location: {location_id}", (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-    output_dir = "output"
-    os.makedirs(output_dir, exist_ok=True)
+@app.post("/start-simulation")
+def start_simulation_endpoint(background_tasks: BackgroundTasks):
+    print("📡 /start-simulation called")
+    if not simulation_state["running"]:
+        background_tasks.add_task(start_simulation)
+        print("🟢 Simulation started in background")
+        return {"status": "started"}
+    print("⚠️ Simulation already running")
+    return {"status": "already running"}
 
-    output_path = os.path.join(output_dir, f"location_{location_id}_output.jpg")
-    cv2.imwrite(output_path, image)
-    print(f"Saved annotated image for Location {location_id} to {output_path}")
+@app.post("/stop-simulation")
+def stop_simulation_endpoint():
+    print("🛑 /stop-simulation called — stopping simulation")
+    stop_simulation()
+    return {"status": "stopped"}
 
-def test_firebase_image_access_and_inference(location_id=1):
-    try:
-        # Step 1: Get a random image from Firebase (in memory)
-        image_data = get_random_image_from_location(location_id)
-        if not image_data:
-            print(f"No images found for location {location_id}")
-            return
-
-        image = image_data['image']
-        print(f"Image fetched from Firebase for Location {location_id}, shape: {image.shape}")
-
-        # Step 2: Run inference (on the image, not a path)
-        results = run_detection(image)
-
-        # Step 3: Handle results
-        if results['detections']:
-            print(f"Inference results for Location {location_id}:")
-            for detection in results['detections']:
-                print(f"- {detection['class']} (confidence: {detection['confidence']:.2f})")
-
-            save_results(results['image'], results['detections'], location_id)
-        else:
-            print(f"Inference failed or no fire/smoke detected for Location {location_id}.")
-
-    except Exception as e:
-        print(f"Error: {e}")
-    finally:
-        time.sleep(1)
-        gc.collect()
-
-if __name__ == "__main__":
-    test_firebase_image_access_and_inference(location_id=1)
+@app.get("/fire-events")
+def get_current_detections():
+    print("📍 /fire-events called — returning current detections")
+    from app.simulation import simulation_state
+    return simulation_state["fire_events"]
