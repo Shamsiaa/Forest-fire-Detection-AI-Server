@@ -1,84 +1,126 @@
 import time
 import threading
+import asyncio
 import random
-
-from firebase.db_operations import get_random_image_from_location
+from datetime import datetime
+from firebase.db_operations import get_valid_images_from_location, load_image_from_url
 from .inference import run_detection
+from firebase.config import db
 
-# Shared state
 simulation_state = {
     "running": False,
-    "fire_events": [],
-    "seen_images": set()  # Track processed images to avoid duplicates
+    "fire_events": []
 }
 
-# Locations to fetch images from (all 9 locations)
-locations = list(range(1, 10))  # Assuming location IDs are 1 to 9
+MAX_DETECTIONS = 4  # Maximum 4 detections total
+DETECTION_DELAY = 2  # Delay between detections
 
-def generate_fire_event_from_db(location_id=None):
-    """Generates a fire event from the given location."""
-    # Default to random location if None is passed
-    if location_id is None:
-        location_id = random.choice(locations)
-    
-    data = get_random_image_from_location(location_id)
-    if not data or "image" not in data:
-        return None
+async def simulate_fire_detection():
+    simulation_state["running"] = True
+    simulation_state["fire_events"] = []  # Reset previous fire events
 
-    filename = data["original_data"].get("filename")
-    if filename in simulation_state["seen_images"]:
-        print(f"⏩ Skipping already seen image: {filename}")
-        return None  # Skip if this image has already been processed
+    # Get all forest locations
+    location_docs = db.collection("forestLocations").stream()
+    forest_locations = [doc.id for doc in location_docs]
+    random.shuffle(forest_locations)  # Randomize the order
 
-    # Add image filename to seen images to prevent reprocessing
-    simulation_state["seen_images"].add(filename)
+    total_detected = 0
+    used_locations = set()  # Track which locations we've already used
 
-    detection_result = run_detection(data["image"])
-    for det in detection_result["detections"]:
-        if det["class"] in ["fire", "smoke"]:
-            return {
-                "coords": {
-                    "latitude": data["latitude"],
-                    "longitude": data["longitude"]
-                },
-                "class": det["class"],
-                "confidence": det["confidence"],
-                "filename": filename,
-                "timestamp": data["original_data"].get("timestamp"),
-                "image_url": data["original_data"].get("image_url")
-            }
-    return None
-
-def run_simulation():
-    """Runs the simulation and generates fire events periodically."""
-    while simulation_state["running"]:
-        events = []
+    while total_detected < MAX_DETECTIONS and simulation_state["running"]:
+        # Find next available location we haven't used yet
+        location_id = None
+        for loc_id in forest_locations:
+            if loc_id not in used_locations:
+                location_id = loc_id
+                break
         
-        # Fetch random images from all locations and process them
-        for _ in range(random.randint(1, 3)):  # Fetch 1 to 3 detections per round
-            # Fetch image from random location
-            event = generate_fire_event_from_db(location_id=None)
-            if event:
-                events.append(event)
+        if location_id is None:
+            print("⚠️ No more unique forest locations available")
+            break
 
-            # Add a small delay between processing each image
-            time.sleep(4)  # Adjust delay as necessary (2 seconds here for example)
+        valid_images = get_valid_images_from_location(location_id)
+        if not valid_images:
+            used_locations.add(location_id)
+            continue
 
-        # Update fire events state with the new detections
-        simulation_state["fire_events"] = events
-        time.sleep(5)  # Delay between cycles to allow map updates (5 seconds)
+        # Take one random image from this location
+        image_data = random.choice(valid_images)
+        used_locations.add(location_id)
+
+        image = load_image_from_url(image_data["image_url"])
+        if image is None:
+            continue
+
+        result = run_detection(image)
+        if result["status"] != "nothing detected":
+            # Extract first detection info
+            first_detection = result["detections"][0] if result["detections"] else {}
+            detected_class = first_detection.get("class", "unknown")
+            confidence = first_detection.get("confidence", 0.0)
+
+            # Avoid duplicate alerts
+            existing = db.collection("alerts").where("image_location", "==", image_data["image_url"]).get()
+            if not existing:
+                # Get forest name
+                forest_doc = db.collection("forestLocations").document(location_id).get()
+                forest_name = forest_doc.get("forest_name") if forest_doc.exists else "Unknown"
+
+                # Create alert
+                alert_ref = db.collection("alerts").document()
+                alert_ref.set({
+                    "forest_name": forest_name,
+                    "image_location": image_data["image_url"],
+                    "detection_status": "active",
+                    "timestamp": datetime.utcnow(),
+                    "alert_id": alert_ref.id
+                })
+
+                # Update image alert status
+                db.collection("forestLocations") \
+                    .document(location_id) \
+                    .collection("drones") \
+                    .document(image_data["drone_id"]) \
+                    .collection("images") \
+                    .document(image_data["image_doc_id"]) \
+                    .update({"alert_status": "active"})
+
+                # Store fire event for frontend
+                simulation_state["fire_events"].append({
+                    "coords": {
+                        "latitude": image_data["latitude"],
+                        "longitude": image_data["longitude"]
+                    },
+                    "image_url": image_data["image_url"],
+                    "forest_name": forest_name,
+                    "class": detected_class,
+                    "confidence": confidence
+                })
+
+                # Keep only the most recent 4
+                simulation_state["fire_events"] = simulation_state["fire_events"][-MAX_DETECTIONS:]
+
+                total_detected += 1
+                print(f"🔥 Alert created at {forest_name} ({image_data['latitude']}, {image_data['longitude']})")
+
+            await asyncio.sleep(DETECTION_DELAY)
+
+    simulation_state["running"] = False
 
 def start_simulation():
-    """Starts the simulation in a background thread."""
-    if not simulation_state["running"]:
-        simulation_state["running"] = True
-        simulation_state["seen_images"] = set()  # Reset image history on start
-        threading.Thread(target=run_simulation, daemon=True).start()
-        print("🟢 Simulation started in background")
+    if simulation_state["running"]:
+        print("⚠️ Simulation already running — skipping")
+        return
+
+    print("🚀 Starting fire simulation thread...")
+    simulation_state["running"] = True
+
+    def run_simulation():
+        asyncio.run(simulate_fire_detection())
+
+    thread = threading.Thread(target=run_simulation)
+    thread.start()
 
 def stop_simulation():
-    """Stops the simulation and resets the state."""
+    print("🛑 Stopping simulation")
     simulation_state["running"] = False
-    simulation_state["fire_events"] = []
-    simulation_state["seen_images"] = set()  # Reset processed image history
-    print("🛑 Simulation stopped and state reset")

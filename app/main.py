@@ -1,9 +1,11 @@
 from fastapi import FastAPI, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from app.simulation import start_simulation, stop_simulation, simulation_state
+from .simulation import start_simulation, stop_simulation, simulation_state
+from .alerts import router as alerts_router  # Direct import from same directory
 
 app = FastAPI()
 
+# Allow all CORS for development
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -31,5 +33,37 @@ def stop_simulation_endpoint():
 @app.get("/fire-events")
 def get_current_detections():
     print("📍 /fire-events called — returning current detections")
-    from app.simulation import simulation_state
-    return simulation_state["fire_events"]
+
+    fire_events = simulation_state.get("fire_events", [])
+    formatted_events = []
+
+    for event in fire_events:
+        coords = event.get("coords", {})
+        lat = coords.get("latitude")
+        lon = coords.get("longitude")
+
+        # Validate latitude/longitude
+        if lat is None or lon is None:
+            continue
+
+        try:
+            lat = float(lat)
+            lon = float(lon)
+        except ValueError:
+            continue
+
+        formatted_events.append({
+            "coords": {
+                "latitude": lat,
+                "longitude": lon
+            },
+            "image_url": event.get("image_url"),
+            "forest_name": event.get("forest_name"),
+            "class": event.get("class"),
+            "confidence": event.get("confidence", 0)
+        })
+
+    return formatted_events
+
+# Include alert routes with prefix
+app.include_router(alerts_router, prefix="/alerts", tags=["alerts"])
