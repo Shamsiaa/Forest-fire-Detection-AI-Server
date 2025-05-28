@@ -1,9 +1,12 @@
 from fastapi import FastAPI, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from concurrent.futures import ThreadPoolExecutor
+import asyncio
 from .simulation import start_simulation, stop_simulation, simulation_state
-from .alerts import router as alerts_router  # Direct import from same directory
+from .alerts import router as alerts_router
 
 app = FastAPI()
+executor = ThreadPoolExecutor(max_workers=1)  # Single worker for simulation
 
 # Allow all CORS for development
 app.add_middleware(
@@ -15,10 +18,12 @@ app.add_middleware(
 )
 
 @app.post("/start-simulation")
-def start_simulation_endpoint(background_tasks: BackgroundTasks):
+async def start_simulation_endpoint():
     print("📡 /start-simulation called")
     if not simulation_state["running"]:
-        background_tasks.add_task(start_simulation)
+        # Run in separate thread to avoid blocking
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(executor, start_simulation)
         print("🟢 Simulation started in background")
         return {"status": "started"}
     print("⚠️ Simulation already running")
@@ -33,19 +38,14 @@ def stop_simulation_endpoint():
 @app.get("/fire-events")
 def get_current_detections():
     print("📍 /fire-events called — returning current detections")
-
     fire_events = simulation_state.get("fire_events", [])
     formatted_events = []
-
     for event in fire_events:
         coords = event.get("coords", {})
         lat = coords.get("latitude")
         lon = coords.get("longitude")
-
-        # Validate latitude/longitude
         if lat is None or lon is None:
             continue
-
         try:
             lat = float(lat)
             lon = float(lon)
@@ -60,9 +60,9 @@ def get_current_detections():
             "image_url": event.get("image_url"),
             "forest_name": event.get("forest_name"),
             "class": event.get("class"),
-            "confidence": event.get("confidence", 0)
+            "confidence": event.get("confidence", 0),
+            "location_id": event.get("location_id")  
         })
-
     return formatted_events
 
 # Include alert routes with prefix

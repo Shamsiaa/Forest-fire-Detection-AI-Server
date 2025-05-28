@@ -4,15 +4,13 @@ from typing import Dict, Any, List
 
 # Load the model once
 model = YOLO("model/best.pt")
-
 def run_detection(image: np.ndarray) -> Dict[str, Any]:
     """Run detection on an image array using YOLO and return parsed results."""
     if image is None or not isinstance(image, np.ndarray):
-        raise ValueError("❌ Invalid image provided for detection.")
+        raise ValueError(" Invalid image provided for detection.")
 
     print("🔍 Running YOLO detection...")
     
-    # Run YOLO prediction (you can consider resizing or altering conf thresholds for better performance)
     results = model.predict(image, conf=0.6)
     
     detections: List[Dict[str, Any]] = []
